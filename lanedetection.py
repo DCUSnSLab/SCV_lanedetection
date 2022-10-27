@@ -3,6 +3,7 @@ import rospy
 import cv2
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
+from morai_msgs.msg import CtrlCmd
 from sensor_msgs.msg import Image
 from sensor_msgs.msg import CompressedImage
 import time
@@ -10,18 +11,51 @@ from PyQt5.QtWidgets import  QWidget, QLabel, QApplication
 from PyQt5.QtCore import QThread, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QImage, QPixmap
 
+class pidController:  ## 속도 제어를 위한 PID 적용 ##
+    def __init__(self, p=1.0, i=1.0, d=1.0, rate=30):
+        self.p_gain = p
+        self.i_gain = i
+        self.d_gain = d
+        self.controlTime = 1/rate
+        self.prev_error = 0
+        self.i_control = 0
+
+    def pid(self, target_vel, current_vel):
+        error = target_vel - current_vel.x
+
+        p_control = self.p_gain * error
+        self.i_control += self.i_gain * error
+        d_control = self.d_gain * (error - self.prev_error)
+
+        output = p_control + self.i_control + d_control
+        self.prev_error = error
+        return output
+
+    def pid_1(self, target_vel, current_vel):
+        error = target_vel - current_vel
+
+        p_control = self.p_gain * error
+        self.i_control += self.i_gain * error * self.controlTime
+        d_control = self.d_gain * (error - self.prev_error) / self.controlTime
+
+        output = p_control + self.i_control + d_control
+        self.prev_error = error
+        return output
+
 class cvThread(QThread):
     signal = pyqtSignal(QImage)
 
     def __init__(self, qt):
         super(cvThread, self).__init__(parent=qt)
         print('init')
-        rospy.init_node('gray')
+        rospy.init_node('LaneDetection_Ctrl')
         self.prevTime = 0
         self.selecting_sub_image = "compressed"  # you can choose image type "compressed", "raw"
         self.isSim = True
         self.wrapCaliDone = False
 
+        self.ctrl_pub = rospy.Publisher('lp_ctrl', CtrlCmd, queue_size=1)
+        self.pid = pidController(p=9, i=0.1, d=2.0, rate=30)
         if self.selecting_sub_image == "compressed":
             if self.isSim :
                 self._sub = rospy.Subscriber('/image_jpeg/compressed', CompressedImage, self.callback, queue_size=1)
@@ -89,10 +123,11 @@ class cvThread(QThread):
 
         # b_out = cuv_img #cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
 
-        out_img = self.lane.process_image(cv_image)
+        out_img, output_data = self.lane.process_image(cv_image)
+
+        self.control_unit(output_data)
+
         h, w, ch = out_img.shape
-
-
         # size = cv_image.nbytes
         curTime = time.time()
         sec = curTime - self.prevTime
@@ -114,6 +149,23 @@ class cvThread(QThread):
     def run(self):
         rospy.spin()
 
+    def control_unit(self, data):
+        center_dist = data[0]
+        left_curv = data[1]
+        right_curv = data[2]
+
+        steering = 0#self.pid.pid_1(0, abs(center_dist))
+
+        if center_dist < 0 :
+            steering = -1
+        else:
+            steering = 1
+        #steering = 5
+        print(steering, center_dist, left_curv, right_curv)
+        send = CtrlCmd()
+        send.velocity = 5
+        send.steering = steering
+        self.ctrl_pub.publish(send)
 
 
 class LaneDet():
@@ -179,8 +231,8 @@ class LaneDet():
         #get origin output
         cvwraped, cvM, cvminv, cv_out_img_orig, cv_out_warped_img = self.transform_image(image)
 
-        xmtr_per_pixel = 3.7 / 800
-        ymtr_per_pixel = 30 / 720
+        xmtr_per_pixel = 6.7 / 400 #3.7 / 400#800
+        ymtr_per_pixel = 30 / 480 #720
         cuv_img = None
         if True or self.best_fit_left is None and self.best_fit_right is None:
             left_fit, right_fit, left_fitx, right_fitx, left_lane_indices, right_lane_indices, cuv_img = self.fit_polynomial\
@@ -209,7 +261,18 @@ class LaneDet():
         # merge to horizontal
         numpy_horizontal2 = np.concatenate((self.draw_wrapinfo(image), birdeye_debug), axis=1)
         num_mergy = np.concatenate((numpy_horizontal1, numpy_horizontal2), axis=0)
-        return num_mergy#out_img
+
+        center_dist, left_curv, right_curv = self.publish_data(lane_img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel)
+
+        return num_mergy, (center_dist, left_curv, right_curv)#out_img
+
+    def publish_data(self, img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel):
+        (left_curvature, right_curvature) = self.radius_curvature(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
+        center_dist, dist_txt = self.dist_from_center(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
+
+        return center_dist, left_curvature, right_curvature
+
+
 
     def draw_wrapinfo(self, img):
         out_img = np.copy(img)
@@ -551,7 +614,7 @@ class LaneDet():
     def dist_from_center(self, img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel):
         ## Image mid horizontal position
         # xmax = img.shape[1]*xmtr_per_pixel
-        ymax = img.shape[0] * ymtr_per_pixel
+        ymax = img.shape[0]# * ymtr_per_pixel
 
         center = img.shape[1] / 2
 
@@ -565,7 +628,7 @@ class LaneDet():
         else:
             message = 'Vehicle location: {:.2f} m left'.format(abs(dist))
 
-        return message
+        return dist, message
 
     def draw_lines(self, img, left_fit, right_fit, minv):
         ploty = np.linspace(0, img.shape[0] - 1, img.shape[0])
@@ -591,7 +654,7 @@ class LaneDet():
 
     def show_curvatures(self, img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel):
         (left_curvature, right_curvature) = self.radius_curvature(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
-        dist_txt = self.dist_from_center(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
+        center_dist, dist_txt = self.dist_from_center(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
 
         out_img = np.copy(img)
         avg_rad = round(np.mean([left_curvature, right_curvature]), 0)
