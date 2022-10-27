@@ -19,14 +19,58 @@ class cvThread(QThread):
         rospy.init_node('gray')
         self.prevTime = 0
         self.selecting_sub_image = "compressed"  # you can choose image type "compressed", "raw"
+        self.isSim = True
+        self.wrapCaliDone = False
 
         if self.selecting_sub_image == "compressed":
-            self._sub = rospy.Subscriber('/zed2/zed_node/left/image_rect_color/compressed', CompressedImage, self.callback, queue_size=1)
+            if self.isSim :
+                self._sub = rospy.Subscriber('/image_jpeg/compressed', CompressedImage, self.callback, queue_size=1)
+            else:
+                self._sub = rospy.Subscriber('/zed2/zed_node/left/image_rect_color/compressed', CompressedImage, self.callback, queue_size=1)
+
         else:
             self._sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.callback, queue_size=1)
 
         self.bridge = CvBridge()
+        self.lane = LaneDet(max_counter=5)
         print('init finished')
+
+    def doWrapCalibration(self, cv_image):
+        leftupper = (0, 0)
+        rightupper = (0, 0)
+        leftlower = (0, 0)
+        rightlower = (0, 0)
+        warped_leftupper = (0, 0)
+        warped_rightupper = (0, 0)
+        warped_leftlower = (0, 0)
+        warped_rightlower = (0, 0)
+
+
+        if self.isSim:
+            offset = 250
+            leftupper = (285, 250)
+            rightupper = (355, 250)
+            leftlower = (-135, cv_image.shape[0])
+            rightlower = (795, cv_image.shape[0])
+
+            warped_leftupper = (offset, 0)
+            warped_rightupper = (offset, cv_image.shape[0])
+            warped_leftlower = (cv_image.shape[1] - offset, 0)
+            warped_rightlower = (cv_image.shape[1] - offset, cv_image.shape[0])
+        else:
+            offset = 250
+            leftupper = (265, 200)
+            rightupper = (395, 200)
+            leftlower = (-135, cv_image.shape[0])
+            rightlower = (795, cv_image.shape[0])
+
+            warped_leftupper = (offset, 0)
+            warped_rightupper = (offset, cv_image.shape[0])
+            warped_leftlower = (cv_image.shape[1] - offset, 0)
+            warped_rightlower = (cv_image.shape[1] - offset, cv_image.shape[0])
+
+
+        return (np.float32([leftupper, leftlower, rightupper, rightlower]), np.float32([warped_leftupper, warped_rightupper, warped_leftlower, warped_rightlower]))
 
     def callback(self, image_msg):
         # try:
@@ -38,32 +82,18 @@ class cvThread(QThread):
         elif self.selecting_sub_image == "raw":
             cv_image = self.bridge.imgmsg_to_cv2(image_msg, "bgr8")
 
-        kernel_size = 5
-        mag_thresh = (30, 100)
-        r_thresh = (235, 255)
-        s_thresh = (165, 255)
-        b_thresh = (160, 255)
-        g_thresh = (210, 255)
-        combined_binary, combined_output = self.get_bin_img(cv_image, kernel_size=kernel_size, sobel_thresh=mag_thresh, r_thresh=r_thresh,
-                                      s_thresh=s_thresh, b_thresh=b_thresh, g_thresh=g_thresh)
+        if self.wrapCaliDone is False:
+            wrap_origin, wrap = self.doWrapCalibration(cv_image)
+            self.lane.set_presp_indices(wrap_origin, wrap)
+            self.wrapCaliDone = True
 
-        warped, M, minv, out_img_orig, out_warped_img = self.transform_image(combined_output)
-        cvwraped, cvM, cvminv, cv_out_img_orig, cv_out_warped_img = self.transform_image(cv_image)
+        # b_out = cuv_img #cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
 
-        xmtr_per_pixel = 3.7 / 800
-        ymtr_per_pixel = 30 / 720
+        out_img = self.lane.process_image(cv_image)
+        h, w, ch = out_img.shape
 
-        left_fit, right_fit, left_fitx, right_fitx, left_lane_indices, right_lane_indices, cuv_img = self.fit_polynomial(
-            warped, nwindows=12, margin=15, show=False)
-        line_img = self.draw_lines(cv_image, left_fit, right_fit, minv)
-        out_img = self.show_curvatures(line_img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel)
 
-        b_out = cuv_img #cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
-        origin = out_img#cv_out_img_orig
-        # merge to horizontal
-        numpy_horizontal = np.concatenate((origin, b_out), axis=1)
-
-        size = cv_image.nbytes
+        # size = cv_image.nbytes
         curTime = time.time()
         sec = curTime - self.prevTime
         self.prevTime = curTime
@@ -71,16 +101,11 @@ class cvThread(QThread):
         tstamp = float(image_msg.header.stamp.to_sec())
         #print(tstamp.to_sec(), type(tstamp))
         str = "FPS : %0.1f %0.3f" % (fps, tstamp)
-        cv2.putText(numpy_horizontal, str, (0, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0))
+        cv2.putText(out_img, str, (800, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0))
 
-
-        # h, w, ch = cv_image.shape
-        # convertToQtFormat = QImage(cv_image.data, w, h, cv_image.strides[0], QImage.Format_RGB888)
-
-        h, w, ch = numpy_horizontal.shape
-        convertToQtFormat = QImage(numpy_horizontal.data, w, h, numpy_horizontal.strides[0], QImage.Format_RGB888)
-        p = convertToQtFormat.scaled(640, 480, Qt.KeepAspectRatio)
-        self.signal.emit(convertToQtFormat)
+        convertToQtFormat = QImage(out_img.data, w, h, out_img.strides[0], QImage.Format_RGB888)
+        p = convertToQtFormat.scaled(1280, 960, Qt.KeepAspectRatio)
+        self.signal.emit(p)
 
         #cv2.imshow('cv_gray', cv_image), cv2.waitKey(1)
         # except Exception as e:
@@ -88,6 +113,141 @@ class cvThread(QThread):
 
     def run(self):
         rospy.spin()
+
+
+
+class LaneDet():
+    def __init__(self, max_counter):
+        self.current_fit_left = None
+        self.best_fit_left = None
+        self.history_left = [np.array([False])]
+        self.current_fit_right = None
+        self.best_fit_right = None
+        self.history_right = [np.array([False])]
+        self.counter = 0
+        self.max_counter = 1
+        self.src = None
+        self.dst = None
+
+    def set_presp_indices(self, src, dest):
+        self.src = src
+        self.dst = dest
+
+    def reset(self):
+        self.current_fit_left = None
+        self.best_fit_left = None
+        self.history_left = [np.array([False])]
+        self.current_fit_right = None
+        self.best_fit_right = None
+        self.history_right = [np.array([False])]
+        self.counter = 0
+
+    def update_fit(self, left_fit, right_fit):
+        if self.counter > self.max_counter:
+            self.reset()
+        else:
+            self.current_fit_left = left_fit
+            self.current_fit_right = right_fit
+            self.history_left.append(left_fit)
+            self.history_right.append(right_fit)
+            self.history_left = self.history_left[-self.max_counter:] if len(
+                self.history_left) > self.max_counter else self.history_left
+            self.history_right = self.history_right[-self.max_counter:] if len(
+                self.history_right) > self.max_counter else self.history_right
+            self.best_fit_left = np.mean(self.history_left, axis=0)
+            self.best_fit_right = np.mean(self.history_right, axis=0)
+
+    def process_image(self, image):
+        img = image#self.undistort_no_read(image, objpoints, imgpoints)
+
+        kernel_size = 5
+        mag_thresh = (30, 100)
+        r_thresh = (235, 255)
+        s_thresh = (165, 255)
+        b_thresh = (160, 255)
+        g_thresh = (210, 255)
+        combined_binary, combined_binary255 = self.get_bin_img(img, kernel_size=kernel_size, sobel_thresh=mag_thresh,
+                                      r_thresh=r_thresh, s_thresh=s_thresh, b_thresh=b_thresh, g_thresh=g_thresh)
+
+        if self.src is not None or self.dst is not None:
+            warped, warp_matrix, unwarp_matrix, out_img_orig, out_warped_img = self.transform_image(combined_binary,
+                                                                                               src=self.src,
+                                                                                               dst=self.dst)
+        else:
+            warped, warp_matrix, unwarp_matrix, out_img_orig, out_warped_img = self.transform_image(combined_binary)
+
+        #get origin output
+        cvwraped, cvM, cvminv, cv_out_img_orig, cv_out_warped_img = self.transform_image(image)
+
+        xmtr_per_pixel = 3.7 / 800
+        ymtr_per_pixel = 30 / 720
+        cuv_img = None
+        if True or self.best_fit_left is None and self.best_fit_right is None:
+            left_fit, right_fit, left_fitx, right_fitx, left_lane_indices, right_lane_indices, cuv_img = self.fit_polynomial\
+                (warped, nwindows=15, margin=30, show=False)
+        else:
+            left_fit, right_fit, left_lane_indices, right_lane_indices = self.search_around_poly(warped, self.best_fit_left,
+                                                                                            self.best_fit_right,
+                                                                                            xmtr_per_pixel,
+                                                                                            ymtr_per_pixel)
+        # To debug Find our lane pixels first
+        deb_leftx, deb_lefty, deb_rightx, deb_righty, deb_left_lane_indices, deb_right_lane_indices, f_line_img \
+            = self.find_lines(warped, nwindows=15, margin=30, minpix=50)
+
+        self.counter += 1
+
+        birdeye_debug = self.draw_birdeye_debug(warped, left_fit, right_fit, deb_leftx, deb_lefty, deb_rightx, deb_righty,
+                                                deb_left_lane_indices, deb_right_lane_indices, unwarp_matrix)
+        lane_img = self.draw_lines(img, left_fit, right_fit, unwarp_matrix)
+        out_img = self.show_curvatures(lane_img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel)
+
+        self.update_fit(left_fit, right_fit)
+
+        cv_out_img_orig = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
+        # merge to horizontal
+        numpy_horizontal1 = np.concatenate((out_img, f_line_img), axis=1)
+        # merge to horizontal
+        numpy_horizontal2 = np.concatenate((self.draw_wrapinfo(image), birdeye_debug), axis=1)
+        num_mergy = np.concatenate((numpy_horizontal1, numpy_horizontal2), axis=0)
+        return num_mergy#out_img
+
+    def draw_wrapinfo(self, img):
+        out_img = np.copy(img)
+        if self.src is not None and self.dst is not None:
+            color_r = [0, 0, 255]
+            color_g = [0, 255, 0]
+            line_width = 5
+            src = tuple(map(tuple, self.src))
+            cv2.line(out_img, src[1], src[0], color_r, line_width)
+            cv2.line(out_img, src[1], src[3], color_r, line_width * 2)
+            cv2.line(out_img, src[2], src[3], color_r, line_width)
+            cv2.line(out_img, src[2], src[0], color_g, line_width)
+
+        return out_img
+
+    def draw_birdeye_debug(self, unwarp_img, left_fit, right_fit, leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, minv):
+        ploty = np.linspace(0, unwarp_img.shape[0] - 1, unwarp_img.shape[0])
+        unwarp_img = np.where(unwarp_img == 1, 255, unwarp_img)
+        unwarp_img = cv2.cvtColor(unwarp_img, cv2.COLOR_GRAY2BGR)
+
+        # Colors in the left and right lane regions
+        unwarp_img[lefty, leftx] = [255, 0, 0]
+        unwarp_img[righty, rightx] = [0, 0, 255]
+
+        # Find left and right points.
+        left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
+        right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
+
+        for y, data in enumerate(left_fitx):
+            left_val = unwarp_img.shape[1] - 1 if int(left_fitx[y]) >= unwarp_img.shape[1] else int(left_fitx[y])
+            left_val = 0 if left_val < 0 else left_val
+            right_val = unwarp_img.shape[1] - 1 if int(right_fitx[y]) >= unwarp_img.shape[1] else int(right_fitx[y])
+            right_val = 0 if right_val < 0 else right_val
+            # print(left_val, right_val)
+            unwarp_img[y, left_val] = [255, 234, 0]
+            unwarp_img[y, right_val] = [255, 234, 0]
+
+        return unwarp_img
 
     def get_rgb_thresh_img(self, img, channel='R', thresh=(0, 255)):
         img1 = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -179,10 +339,10 @@ class cvThread(QThread):
 
         out_img_orig = np.copy(img)
 
-        leftupper = (250, 200)
-        rightupper = (390, 200)
-        leftlower = (-150, img.shape[0])
-        rightlower = (790, img.shape[0])
+        leftupper = (265, 200)
+        rightupper = (395, 200)
+        leftlower = (-135, img.shape[0])
+        rightlower = (795, img.shape[0])
 
         warped_leftupper = (offset, 0)
         warped_rightupper = (offset, img.shape[0])
@@ -307,8 +467,9 @@ class cvThread(QThread):
         leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, out_img \
             = self.find_lines(binary_warped, nwindows=nwindows, margin=margin, minpix=minpix)
 
-        left_fit = np.polyfit(lefty, leftx, 2)
-        right_fit = np.polyfit(righty, rightx, 2)
+        left_fit = np.array([0, 0, 0]) if lefty.size == 0 and leftx.size == 0 else np.polyfit(lefty, leftx, 2)
+        right_fit = np.array([0, 0, 0]) if rightx.size == 0 and righty.size == 0 else np.polyfit(righty, rightx, 2)
+
 
         # Generate x and y values for plotting
         ploty = np.linspace(0, binary_warped.shape[0] - 1, binary_warped.shape[0])
@@ -339,6 +500,36 @@ class cvThread(QThread):
         #     plt.plot(right_fitx, ploty, color='yellow')
 
         return left_fit, right_fit, left_fitx, right_fitx, left_lane_inds, right_lane_inds, out_img
+
+    def search_around_poly(self, binary_warped, left_fit, right_fit, ymtr_per_pixel, xmtr_per_pixel, margin=80):
+        nonzero = binary_warped.nonzero()
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+
+        left_lane_inds = ((nonzerox > (left_fit[0] * (nonzeroy ** 2) + left_fit[1] * nonzeroy +
+                                       left_fit[2] - margin)) & (nonzerox < (left_fit[0] * (nonzeroy ** 2) +
+                                                                             left_fit[1] * nonzeroy + left_fit[
+                                                                                 2] + margin)))
+        right_lane_inds = ((nonzerox > (right_fit[0] * (nonzeroy ** 2) + right_fit[1] * nonzeroy +
+                                        right_fit[2] - margin)) & (nonzerox < (right_fit[0] * (nonzeroy ** 2) +
+                                                                               right_fit[1] * nonzeroy + right_fit[
+                                                                                   2] + margin)))
+
+        # Again, extract left and right line pixel positions
+        leftx = nonzerox[left_lane_inds]
+        lefty = nonzeroy[left_lane_inds]
+        rightx = nonzerox[right_lane_inds]
+        righty = nonzeroy[right_lane_inds]
+
+        # Fit a second order polynomial to each using `np.polyfit`
+        left_fit = np.polyfit(lefty, leftx, 2)
+        right_fit = np.polyfit(righty, rightx, 2)
+
+        # Fit second order polynomial to for for points on real world
+        left_lane_indices = np.polyfit(lefty * ymtr_per_pixel, leftx * xmtr_per_pixel, 2)
+        right_lane_indices = np.polyfit(righty * ymtr_per_pixel, rightx * xmtr_per_pixel, 2)
+
+        return left_fit, right_fit, left_lane_indices, right_lane_indices
 
     def radius_curvature(self, img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel):
         ploty = np.linspace(0, img.shape[0] - 1, img.shape[0])
@@ -395,6 +586,7 @@ class cvThread(QThread):
         # Warp the blank back to original image space using inverse perspective matrix
         unwarp_img = cv2.warpPerspective(color_warp, minv, (img.shape[1], img.shape[0]),
                                          flags=cv2.WARP_FILL_OUTLIERS + cv2.INTER_CUBIC)
+
         return cv2.addWeighted(img, 1, unwarp_img, 0.3, 0)
 
     def show_curvatures(self, img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel):
@@ -417,6 +609,8 @@ class App(QWidget):
         self.top = 100
         self.width = 1920
         self.height = 1080
+        self.wsize = 1280
+        self.hsize = 960
         self.initUI()
 
     @pyqtSlot(QImage)
@@ -427,10 +621,10 @@ class App(QWidget):
 
         self.setWindowTitle(self.title)
         self.setGeometry(self.left, self.top, self.width, self.height)
-        self.resize(1280, 720)
+        self.resize(self.wsize, self.hsize)
         # create a label
         self.label = QLabel(self)
-        self.label.resize(1280, 720)
+        self.label.resize(self.wsize, self.hsize)
 
         self.show()
         time.sleep(1)
