@@ -51,7 +51,7 @@ class cvThread(QThread):
         rospy.init_node('LaneDetection_Ctrl')
         self.prevTime = 0
         self.selecting_sub_image = "compressed"  # you can choose image type "compressed", "raw"
-        self.isSim = True
+        self.isSim = False
         self.wrapCaliDone = False
 
         self.ctrl_pub = rospy.Publisher('lp_ctrl', CtrlCmd, queue_size=1)
@@ -161,7 +161,7 @@ class cvThread(QThread):
         else:
             steering = 1
         #steering = 5
-        print(steering, center_dist, left_curv, right_curv)
+        #print(steering, center_dist, left_curv, right_curv)
         send = CtrlCmd()
         send.velocity = 5
         send.steering = steering
@@ -214,6 +214,13 @@ class LaneDet():
 
         kernel_size = 5
         mag_thresh = (30, 100)
+        #for simulator
+        # r_thresh = (235, 255)
+        # s_thresh = (70, 255)
+        # b_thresh = (160, 255)
+        # g_thresh = (245, 255)
+
+        #for zed2
         r_thresh = (235, 255)
         s_thresh = (165, 255)
         b_thresh = (160, 255)
@@ -269,6 +276,7 @@ class LaneDet():
     def publish_data(self, img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel):
         (left_curvature, right_curvature) = self.radius_curvature(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
         center_dist, dist_txt = self.dist_from_center(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
+        self.getTargetPoint(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
 
         return center_dist, left_curvature, right_curvature
 
@@ -297,6 +305,12 @@ class LaneDet():
         unwarp_img[lefty, leftx] = [255, 0, 0]
         unwarp_img[righty, rightx] = [0, 0, 255]
 
+        #get center curvature
+        left_poly = np.poly1d(left_fit)
+        right_poly = np.poly1d(right_fit)
+        center_pol = (left_poly + right_poly) / 2
+        center_fitx = center_pol(ploty)
+
         # Find left and right points.
         left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
         right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
@@ -309,6 +323,10 @@ class LaneDet():
             # print(left_val, right_val)
             unwarp_img[y, left_val] = [255, 234, 0]
             unwarp_img[y, right_val] = [255, 234, 0]
+
+            center_val = unwarp_img.shape[1] - 1 if int(center_fitx[y]) >= unwarp_img.shape[1] else int(center_fitx[y])
+            center_val = 0 if center_val < 0 else center_val
+            unwarp_img[y, center_val] = [255, 0, 0]
 
         return unwarp_img
 
@@ -393,6 +411,7 @@ class LaneDet():
         combined_binary255 = np.zeros_like(combined)
         combined_binary[(r_binary == 1) | (combined == 1) | (s_binary == 1) | (b_binary == 1) | (g_binary == 1)] = 1
         combined_binary255[(r_binary == 1) | (combined == 1) | (s_binary == 1) | (b_binary == 1) | (g_binary == 1)] = 255
+        #combined_binary255[(s_binary == 1)] = 255
 
         return combined_binary, combined_binary255
         # return gray
@@ -663,6 +682,23 @@ class LaneDet():
         cv2.putText(out_img, dist_txt, (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
         return out_img
+
+    def getTargetPoint(self, img, left_fit, right_fit, ymtr_per_pixel, xmtr_per_pixel):
+        ploty = np.linspace(0, img.shape[0] - 1, img.shape[0])
+        # get center curvature
+        left_poly = np.poly1d(left_fit)
+        right_poly = np.poly1d(right_fit)
+        center_pol = (left_poly + right_poly) / 2
+        center_fitx = center_pol(ploty)
+        a = center_pol[0]
+        b = center_pol[1]
+        c = center_pol[2]
+
+        left_fit_cr = np.polyfit(ploty * ymtr_per_pixel, center_fitx * xmtr_per_pixel, 2)
+        right_fit_cr = np.polyfit(ploty * ymtr_per_pixel, center_fitx * xmtr_per_pixel, 2)
+
+
+
 
 class App(QWidget):
     def __init__(self):
