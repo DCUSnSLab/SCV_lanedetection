@@ -43,11 +43,8 @@ class pidController:  ## 속도 제어를 위한 PID 적용 ##
         self.prev_error = error
         return output
 
-class cvThread(QThread):
-    signal = pyqtSignal(QImage)
-
-    def __init__(self, qt):
-        super(cvThread, self).__init__(parent=qt)
+class cvThread():
+    def __init__(self):
         print('init')
         rospy.init_node('LaneDetection_Ctrl')
         self.prevTime = 0
@@ -141,7 +138,6 @@ class cvThread(QThread):
 
         convertToQtFormat = QImage(out_img.data, w, h, out_img.strides[0], QImage.Format_RGB888)
         p = convertToQtFormat.scaled(1280, 960, Qt.KeepAspectRatio)
-        self.signal.emit(p)
 
         #cv2.imshow('cv_gray', cv_image), cv2.waitKey(1)
         # except Exception as e:
@@ -165,8 +161,8 @@ class cvThread(QThread):
         steering = target_angle
         #print(steering, center_dist, left_curv, right_curv)
         send = CtrlCmd()
-        send.velocity = 2
-        send.steering = -steering
+        send.velocity = 5
+        send.steering = steering
         self.ctrl_pub.publish(send)
 
 
@@ -750,39 +746,6 @@ class LaneDet():
         return center_pol, center_fitx, ang_fitx, target_angle
 
 
-class App(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.title = 'PyQt5 Video'
-        self.left = 100
-        self.top = 100
-        self.width = 1920
-        self.height = 1080
-        self.wsize = 1280
-        self.hsize = 960
-        self.initUI()
-
-    @pyqtSlot(QImage)
-    def setImage(self, image):
-        self.label.setPixmap(QPixmap.fromImage(image))
-
-    def initUI(self):
-
-        self.setWindowTitle(self.title)
-        self.setGeometry(self.left, self.top, self.width, self.height)
-        self.resize(self.wsize, self.hsize)
-        # create a label
-        self.label = QLabel(self)
-        self.label.resize(self.wsize, self.hsize)
-
-        self.show()
-        time.sleep(1)
-        th = cvThread(self)
-        th.signal.connect(self.setImage)
-        # th.changePixmap.connect(self.setImage)
-        th.start()
-
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    ex = App()
-    sys.exit(app.exec_())
+    th = cvThread()
+    th.run()
