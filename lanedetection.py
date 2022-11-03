@@ -1,3 +1,4 @@
+import math
 import sys
 import rospy
 import cv2
@@ -153,14 +154,15 @@ class cvThread(QThread):
         center_dist = data[0]
         left_curv = data[1]
         right_curv = data[2]
+        target_angle = data[3]
 
         steering = 0#self.pid.pid_1(0, abs(center_dist))
 
-        if center_dist < 0 :
-            steering = -1
-        else:
-            steering = 1
-        #steering = 5
+        # if center_dist < 0 :
+        #     steering = target_angle
+        # else:
+        #     steering = 1
+        steering = target_angle
         #print(steering, center_dist, left_curv, right_curv)
         send = CtrlCmd()
         send.velocity = 5
@@ -180,6 +182,8 @@ class LaneDet():
         self.max_counter = 1
         self.src = None
         self.dst = None
+
+        self.prevCenterFit = None
 
     def set_presp_indices(self, src, dest):
         self.src = src
@@ -269,16 +273,16 @@ class LaneDet():
         numpy_horizontal2 = np.concatenate((self.draw_wrapinfo(image), birdeye_debug), axis=1)
         num_mergy = np.concatenate((numpy_horizontal1, numpy_horizontal2), axis=0)
 
-        center_dist, left_curv, right_curv = self.publish_data(lane_img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel)
+        center_dist, left_curv, right_curv, target_angle = self.publish_data(lane_img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel)
 
-        return num_mergy, (center_dist, left_curv, right_curv)#out_img
+        return num_mergy, (center_dist, left_curv, right_curv, target_angle)#out_img
 
     def publish_data(self, img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel):
-        (left_curvature, right_curvature) = self.radius_curvature(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
+        (left_curvature, right_curvature) = self.radius_curvature_both(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
         center_dist, dist_txt = self.dist_from_center(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
-        self.getTargetPoint(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
+        center_pol, center_fitx, ang_fitx, target_angle = self.getTargetPoint(img, leftx, rightx)
 
-        return center_dist, left_curvature, right_curvature
+        return center_dist, left_curvature, right_curvature, target_angle
 
 
 
@@ -305,11 +309,7 @@ class LaneDet():
         unwarp_img[lefty, leftx] = [255, 0, 0]
         unwarp_img[righty, rightx] = [0, 0, 255]
 
-        #get center curvature
-        left_poly = np.poly1d(left_fit)
-        right_poly = np.poly1d(right_fit)
-        center_pol = (left_poly + right_poly) / 2
-        center_fitx = center_pol(ploty)
+        center_pol, center_fitx, ang_fitx, target_angle = self.getTargetPoint(unwarp_img, left_fit, right_fit)
 
         # Find left and right points.
         left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
@@ -327,6 +327,10 @@ class LaneDet():
             center_val = unwarp_img.shape[1] - 1 if int(center_fitx[y]) >= unwarp_img.shape[1] else int(center_fitx[y])
             center_val = 0 if center_val < 0 else center_val
             unwarp_img[y, center_val] = [255, 0, 0]
+
+            ang_val = unwarp_img.shape[1] - 1 if int(ang_fitx[y]) >= unwarp_img.shape[1] else int(ang_fitx[y])
+            ang_val = 0 if ang_val < 0 else ang_val
+            unwarp_img[y, ang_val] = [0, 255, 0]
 
         return unwarp_img
 
@@ -613,7 +617,7 @@ class LaneDet():
 
         return left_fit, right_fit, left_lane_indices, right_lane_indices
 
-    def radius_curvature(self, img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel):
+    def radius_curvature_both(self, img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel):
         ploty = np.linspace(0, img.shape[0] - 1, img.shape[0])
         left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
         right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
@@ -629,6 +633,19 @@ class LaneDet():
             2 * right_fit_cr[0])
 
         return (left_rad, right_rad)
+
+    def radius_curvature(self, img, pol_data, xmtr_per_pixel, ymtr_per_pixel):
+        ploty = np.linspace(0, img.shape[0] - 1, img.shape[0])
+        fitx = pol_data(ploty)
+        y_eval = np.max(ploty)
+
+        fit_cr = np.polyfit(ploty * ymtr_per_pixel, fitx * xmtr_per_pixel, 2)
+
+        # find radii of curvature
+        rad = ((1 + (2 * fit_cr[0] * y_eval * ymtr_per_pixel + fit_cr[1]) ** 2) ** 1.5) / np.absolute(
+            2 * fit_cr[0])
+
+        return rad
 
     def dist_from_center(self, img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel):
         ## Image mid horizontal position
@@ -672,32 +689,65 @@ class LaneDet():
         return cv2.addWeighted(img, 1, unwarp_img, 0.3, 0)
 
     def show_curvatures(self, img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel):
-        (left_curvature, right_curvature) = self.radius_curvature(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
+        center_pol, center_fitx, ang_fitx, target_angle = self.getTargetPoint(img, leftx, rightx)
+        center_rad = self.radius_curvature(img, center_pol, xmtr_per_pixel, ymtr_per_pixel)
+        (left_curvature, right_curvature) = self.radius_curvature_both(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
         center_dist, dist_txt = self.dist_from_center(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
 
         out_img = np.copy(img)
         avg_rad = round(np.mean([left_curvature, right_curvature]), 0)
-        cv2.putText(out_img, 'Average lane curvature: {:.2f} m'.format(avg_rad),
+        cv2.putText(out_img, 'lane curvature: {:.2f} m'.format(center_rad),
                     (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        cv2.putText(out_img, dist_txt, (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(out_img, 'target angle: {}'.format(target_angle),
+                    (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(out_img, dist_txt, (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
         return out_img
 
-    def getTargetPoint(self, img, left_fit, right_fit, ymtr_per_pixel, xmtr_per_pixel):
+    def getTargetPoint(self, img, left_fit, right_fit):
         ploty = np.linspace(0, img.shape[0] - 1, img.shape[0])
         # get center curvature
         left_poly = np.poly1d(left_fit)
         right_poly = np.poly1d(right_fit)
         center_pol = (left_poly + right_poly) / 2
+
+        if self.prevCenterFit == None:
+            self.prevCenterFit = center_pol
+        else:
+            if abs((img.shape[1]/2) - center_pol(ploty[img.shape[0] - 1])) > 50:
+                center_pol = self.prevCenterFit
+            center_pol = self.prevCenterFit * 0.8 + center_pol * 0.2
+            self.prevCenterFit = center_pol
+
+        #get vertex
+        vy = -center_pol.coeffs[1] / (2*center_pol.coeffs[0])
+        vx = center_pol(vy)
+
+        #calculate center line
+        #center_fitx = center_pol.coeffs[0] * (ploty+vy-img.shape[0]) ** 2 + center_pol.coeffs[1] * (ploty+vy-img.shape[0]) + (center_pol.coeffs[2] + (img.shape[1]/2 - vx))
         center_fitx = center_pol(ploty)
-        a = center_pol[0]
-        b = center_pol[1]
-        c = center_pol[2]
 
-        left_fit_cr = np.polyfit(ploty * ymtr_per_pixel, center_fitx * xmtr_per_pixel, 2)
-        right_fit_cr = np.polyfit(ploty * ymtr_per_pixel, center_fitx * xmtr_per_pixel, 2)
+        #set target point relative to center line
+        rel_len = 60
+        rel_y = img.shape[0] - rel_len
+        rel_x = center_fitx[rel_y]
+        center_y = img.shape[0]
+        center_x = img.shape[1] / 2
+        subtense = rel_x - center_x
+        adjacent = center_y - rel_y
 
+        #cal deg
+        target_angle = math.atan(subtense/adjacent) * 180 / math.pi
+        #print(target_angle)
+        inc = (rel_y - center_y) / (rel_x - center_x)
+        b = inc * (-rel_x) + rel_y
+        #ang_line = np.poly1d([-inc, -b])
+        ang_fitx = -((ploty + -b) / -inc)
 
+        #get rad
+        rad = self.radius_curvature(img, center_pol, 1, 1)
+
+        return center_pol, center_fitx, ang_fitx, target_angle
 
 
 class App(QWidget):
