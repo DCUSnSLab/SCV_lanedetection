@@ -477,6 +477,7 @@ class LaneDet():
         minWidthtoLane = 20
         isLeftAlive = True
         isRightalive = True
+        verifyCnt = [0, 0]
 
         # Take a histogram of the bottom half of the image
         histogram = np.sum(warped_img[warped_img.shape[0] // 2:, :], axis=0)
@@ -518,46 +519,30 @@ class LaneDet():
             good_left_inds = np.empty(0)
             good_right_inds = np.empty(0)
             if lsLeftAlive is True:
-                ### Find the four below boundaries of the window ###
-                win_xleft_low = leftx_current - margin
-                win_xleft_high = leftx_current + margin
-
-                # Draw the windows on the visualization image
-                cv2.rectangle(out_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0, 255, 0), 2)
-
-                ### Identify the nonzero pixels in x and y within the window ###
-                good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & \
-                                  (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
-
-
-
-                ### If you found > minpix pixels, recenter next window ###
-                ### (`right` or `leftx_current`) on their mean position ###
-                if len(good_left_inds) > minpix:
-                    leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
-
+                leftx_current, good_left_inds, verifyCnt[0] = self.__lane_aggregation(out_img, leftx_current, margin, win_y_low,
+                                                                          win_y_high, nonzerox, nonzeroy, minpix,
+                                                                          good_left_inds, verifyCnt[0])
+                # Append these indices to the lists
+                left_lane_inds.append(good_left_inds)
             if lsRightAlive is True:
-                win_xright_low = rightx_current - margin
-                win_xright_high = rightx_current + margin
-
-                cv2.rectangle(out_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0, 255, 0), 2)
-
-                good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & \
-                                   (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
+                rightx_current, good_right_inds, verifyCnt[1] = self.__lane_aggregation(out_img, rightx_current, margin, win_y_low,
+                                                                          win_y_high, nonzerox, nonzeroy, minpix,
+                                                                          good_right_inds, verifyCnt[1])
 
 
+                right_lane_inds.append(good_right_inds)
 
-                if len(good_right_inds) > minpix:
-                    rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
-
-            # Append these indices to the lists
-            left_lane_inds.append(good_left_inds)
-            right_lane_inds.append(good_right_inds)
+            if verifyCnt[0] > 3: #is left lane is not verifying
+                lsLeftAlive = False
+            elif verifyCnt[1] > 2:
+                lsRightAlive = False
 
         # Concatenate the arrays of indices (previously was a list of lists of pixels)
         try:
-            left_lane_inds = np.concatenate(left_lane_inds)
-            right_lane_inds = np.concatenate(right_lane_inds)
+            left_lane_inds = [] if len(left_lane_inds) == 0 else np.concatenate(left_lane_inds)
+            if type(left_lane_inds) is not list: left_lane_inds.astype(np.int64)
+            right_lane_inds = [] if len(right_lane_inds) == 0 else np.concatenate(right_lane_inds)
+            if type(right_lane_inds) is not list: right_lane_inds.astype(np.int64)
         except ValueError:
             # Avoids an error if the above is not implemented fully
             pass
@@ -578,6 +563,22 @@ class LaneDet():
             righty = np.empty(0)
 
         return leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, out_img
+
+    def __lane_aggregation(self, img, currentX, margin, win_y_low, win_y_high, nonzerox, nonzeroy, minpix, good_inds, verifyCnt):
+        win_x_low = currentX - margin
+        win_x_high = currentX + margin
+
+        cv2.rectangle(img, (win_x_low, win_y_low), (win_x_high, win_y_high), (0, 255, 0), 2)
+
+        good_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & \
+                           (nonzerox >= win_x_low) & (nonzerox < win_x_high)).nonzero()[0]
+
+        if len(good_inds) > minpix:
+            currentX = np.int(np.mean(nonzerox[good_inds]))
+        else:
+            verifyCnt += 1
+
+        return currentX, good_inds, verifyCnt
 
     def fit_polynomial(self, binary_warped, nwindows=5, margin=50, minpix=50, show=True):
         # Find our lane pixels first
@@ -749,16 +750,18 @@ class LaneDet():
         center_pol = None
         if len(left_poly.coeffs) < 2 and len(right_poly.coeffs) < 2:
             center_pol = self.prevCenterFit
-        # elif len(left_poly.coeffs) < 2:
-        #     pass
-        #     center_pol = np.poly1d([right_poly.coeffs[0], right_poly.coeffs[1], right_poly.coeffs[2]])
-        #     center_pol.coeffs[2] = self.prevCenterFit.coeffs[2]
-        #
-        # elif len(right_poly.coeffs) < 2:
-        #     pass
-        #     center_pol = np.poly1d([left_poly.coeffs[0], left_poly.coeffs[1], left_poly.coeffs[2]])
-        #     center_pol.coeffs[2] = self.prevCenterFit.coeffs[2]
-        #     #print(center_pol.coeffs)
+        elif len(left_poly.coeffs) < 2:
+            templx = right_poly(img.shape[0] - 1)
+            tempcx = self.prevCenterFit(img.shape[0] - 1)
+            center_pol = np.poly1d([right_poly.coeffs[0], right_poly.coeffs[1], right_poly.coeffs[2]+abs(templx-tempcx)])
+            center_pol.coeffs[2] = self.prevCenterFit.coeffs[2]
+
+        elif len(right_poly.coeffs) < 2:
+            templx = left_poly(img.shape[0]-1)
+            tempcx = self.prevCenterFit(img.shape[0]-1)
+            center_pol = np.poly1d([left_poly.coeffs[0], left_poly.coeffs[1], left_poly.coeffs[2]+abs(templx-tempcx)])
+            #center_pol.coeffs[2] = self.prevCenterFit.coeffs[2]
+            #print(center_pol.coeffs)
         else:
             center_pol = (left_poly + right_poly) / 2
 
