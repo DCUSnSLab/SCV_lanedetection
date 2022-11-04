@@ -217,6 +217,9 @@ class LaneDet():
 
     def process_image(self, image):
         img = image#self.undistort_no_read(image, objpoints, imgpoints)
+        #for fine lane
+        margin = 50
+        minpix = 50
 
         kernel_size = 5
         mag_thresh = (30, 100)
@@ -249,7 +252,7 @@ class LaneDet():
         cuv_img = None
         if True or self.best_fit_left is None and self.best_fit_right is None:
             left_fit, right_fit, left_fitx, right_fitx, left_lane_indices, right_lane_indices, cuv_img = self.fit_polynomial\
-                (warped, nwindows=15, margin=30, show=False)
+                (warped, nwindows=15, margin=margin, minpix=minpix, show=False)
         else:
             left_fit, right_fit, left_lane_indices, right_lane_indices = self.search_around_poly(warped, self.best_fit_left,
                                                                                             self.best_fit_right,
@@ -257,7 +260,7 @@ class LaneDet():
                                                                                             ymtr_per_pixel)
         # To debug Find our lane pixels first
         deb_leftx, deb_lefty, deb_rightx, deb_righty, deb_left_lane_indices, deb_right_lane_indices, f_line_img \
-            = self.find_lines(warped, nwindows=15, margin=30, minpix=50)
+            = self.find_lines(warped, nwindows=15, margin=margin, minpix=minpix)
 
         self.counter += 1
 
@@ -491,8 +494,8 @@ class LaneDet():
         leftx_base = np.argmax(histogram[:midpoint])
         rightx_base = np.argmax(histogram[midpoint:]) + midpoint
 
-        lsLeftAlive = True if abs(leftx_base - midpoint) > minWidthtoLane else False
-        lsRightAlive = True if abs(rightx_base - midpoint) > minWidthtoLane else False
+        # lsLeftAlive = True if abs(leftx_base - midpoint) > minWidthtoLane else False
+        # lsRightAlive = True if abs(rightx_base - midpoint) > minWidthtoLane else False
 
         # Set height of windows - based on nwindows above and image shape
         window_height = np.int(warped_img.shape[0] // nwindows)
@@ -510,6 +513,9 @@ class LaneDet():
         left_lane_inds = []
         right_lane_inds = []
 
+        if isLeftAlive is False:
+            print('false')
+
         # Step through the windows one by one
         for window in range(nwindows):
             # Identify window boundaries in x and y (and right and left)
@@ -518,13 +524,14 @@ class LaneDet():
 
             good_left_inds = np.empty(0)
             good_right_inds = np.empty(0)
-            if lsLeftAlive is True:
+
+            if isLeftAlive is True:
                 leftx_current, good_left_inds, verifyCnt[0] = self.__lane_aggregation(out_img, leftx_current, margin, win_y_low,
                                                                           win_y_high, nonzerox, nonzeroy, minpix,
                                                                           good_left_inds, verifyCnt[0])
                 # Append these indices to the lists
                 left_lane_inds.append(good_left_inds)
-            if lsRightAlive is True:
+            if isRightalive is True:
                 rightx_current, good_right_inds, verifyCnt[1] = self.__lane_aggregation(out_img, rightx_current, margin, win_y_low,
                                                                           win_y_high, nonzerox, nonzeroy, minpix,
                                                                           good_right_inds, verifyCnt[1])
@@ -533,9 +540,9 @@ class LaneDet():
                 right_lane_inds.append(good_right_inds)
 
             if verifyCnt[0] > 3: #is left lane is not verifying
-                lsLeftAlive = False
+                isLeftAlive = False
             elif verifyCnt[1] > 2:
-                lsRightAlive = False
+                isRightalive = False
 
         # Concatenate the arrays of indices (previously was a list of lists of pixels)
         try:
@@ -574,13 +581,15 @@ class LaneDet():
                            (nonzerox >= win_x_low) & (nonzerox < win_x_high)).nonzero()[0]
 
         if len(good_inds) > minpix:
-            currentX = np.int(np.mean(nonzerox[good_inds]))
+            #get 10 percentile data from top to calcuate next bounding box
+            per10 = int(len(good_inds) * 0.1)
+            currentX = np.int(np.mean(nonzerox[good_inds[:per10]]))
         else:
             verifyCnt += 1
 
         return currentX, good_inds, verifyCnt
 
-    def fit_polynomial(self, binary_warped, nwindows=5, margin=50, minpix=50, show=True):
+    def fit_polynomial(self, binary_warped, nwindows=5, margin=80, minpix=50, show=True):
         # Find our lane pixels first
         leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, out_img \
             = self.find_lines(binary_warped, nwindows=nwindows, margin=margin, minpix=minpix)
@@ -751,14 +760,14 @@ class LaneDet():
         if len(left_poly.coeffs) < 2 and len(right_poly.coeffs) < 2:
             center_pol = self.prevCenterFit
         elif len(left_poly.coeffs) < 2:
-            templx = right_poly(img.shape[0] - 1)
-            tempcx = self.prevCenterFit(img.shape[0] - 1)
+            templx = right_poly(img.shape[0] - 20)
+            tempcx = img.shape[1]/2 if self.prevCenterFit is None else self.prevCenterFit(img.shape[0] - 20)
             center_pol = np.poly1d([right_poly.coeffs[0], right_poly.coeffs[1], right_poly.coeffs[2]+abs(templx-tempcx)])
             center_pol.coeffs[2] = self.prevCenterFit.coeffs[2]
 
         elif len(right_poly.coeffs) < 2:
             templx = left_poly(img.shape[0]-1)
-            tempcx = self.prevCenterFit(img.shape[0]-1)
+            tempcx = img.shape[1]/2 if self.prevCenterFit is None else self.prevCenterFit(img.shape[0]-1)
             center_pol = np.poly1d([left_poly.coeffs[0], left_poly.coeffs[1], left_poly.coeffs[2]+abs(templx-tempcx)])
             #center_pol.coeffs[2] = self.prevCenterFit.coeffs[2]
             #print(center_pol.coeffs)
@@ -785,7 +794,7 @@ class LaneDet():
         center_fitx = center_pol(ploty)
 
         #set target point relative to center line
-        rel_len = 60
+        rel_len = 20
         rel_y = img.shape[0] - rel_len
         rel_x = center_fitx[rel_y]
         center_y = img.shape[0]
