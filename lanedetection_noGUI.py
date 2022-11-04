@@ -43,11 +43,8 @@ class pidController:  ## 속도 제어를 위한 PID 적용 ##
         self.prev_error = error
         return output
 
-class cvThread(QThread):
-    signal = pyqtSignal(QImage)
-
-    def __init__(self, qt):
-        super(cvThread, self).__init__(parent=qt)
+class cvThread():
+    def __init__(self):
         print('init')
         rospy.init_node('LaneDetection_Ctrl')
         self.prevTime = 0
@@ -141,7 +138,6 @@ class cvThread(QThread):
 
         convertToQtFormat = QImage(out_img.data, w, h, out_img.strides[0], QImage.Format_RGB888)
         p = convertToQtFormat.scaled(1280, 960, Qt.KeepAspectRatio)
-        self.signal.emit(p)
 
         #cv2.imshow('cv_gray', cv_image), cv2.waitKey(1)
         # except Exception as e:
@@ -165,8 +161,8 @@ class cvThread(QThread):
         steering = target_angle
         #print(steering, center_dist, left_curv, right_curv)
         send = CtrlCmd()
-        send.velocity = 2
-        send.steering = -steering
+        send.velocity = 5
+        send.steering = steering
         self.ctrl_pub.publish(send)
 
 
@@ -184,8 +180,6 @@ class LaneDet():
         self.dst = None
 
         self.prevCenterFit = None
-        self.prevleftPol = None
-        self.prevrightPol = None
 
     def set_presp_indices(self, src, dest):
         self.src = src
@@ -308,10 +302,8 @@ class LaneDet():
         unwarp_img = cv2.cvtColor(unwarp_img, cv2.COLOR_GRAY2BGR)
 
         # Colors in the left and right lane regions
-        if len(lefty) > 0:
-            unwarp_img[lefty, leftx] = [255, 0, 0]
-        if len(righty) > 0:
-            unwarp_img[righty, rightx] = [0, 0, 255]
+        unwarp_img[lefty, leftx] = [255, 0, 0]
+        unwarp_img[righty, rightx] = [0, 0, 255]
 
         center_pol, center_fitx, ang_fitx, target_angle = self.getTargetPoint(unwarp_img, left_fit, right_fit)
 
@@ -474,10 +466,6 @@ class LaneDet():
         return warped, M, minv, out_img_orig, out_warped_img
 
     def find_lines(self, warped_img, nwindows=9, margin=80, minpix=40):
-        minWidthtoLane = 20
-        isLeftAlive = True
-        isRightalive = True
-        verifyCnt = [0, 0]
 
         # Take a histogram of the bottom half of the image
         histogram = np.sum(warped_img[warped_img.shape[0] // 2:, :], axis=0)
@@ -490,9 +478,6 @@ class LaneDet():
         midpoint = np.int(histogram.shape[0] // 2)
         leftx_base = np.argmax(histogram[:midpoint])
         rightx_base = np.argmax(histogram[midpoint:]) + midpoint
-
-        lsLeftAlive = True if abs(leftx_base - midpoint) > minWidthtoLane else False
-        lsRightAlive = True if abs(rightx_base - midpoint) > minWidthtoLane else False
 
         # Set height of windows - based on nwindows above and image shape
         window_height = np.int(warped_img.shape[0] // nwindows)
@@ -516,69 +501,48 @@ class LaneDet():
             win_y_low = warped_img.shape[0] - (window + 1) * window_height
             win_y_high = warped_img.shape[0] - window * window_height
 
-            good_left_inds = np.empty(0)
-            good_right_inds = np.empty(0)
-            if lsLeftAlive is True:
-                leftx_current, good_left_inds, verifyCnt[0] = self.__lane_aggregation(out_img, leftx_current, margin, win_y_low,
-                                                                          win_y_high, nonzerox, nonzeroy, minpix,
-                                                                          good_left_inds, verifyCnt[0])
-                # Append these indices to the lists
-                left_lane_inds.append(good_left_inds)
-            if lsRightAlive is True:
-                rightx_current, good_right_inds, verifyCnt[1] = self.__lane_aggregation(out_img, rightx_current, margin, win_y_low,
-                                                                          win_y_high, nonzerox, nonzeroy, minpix,
-                                                                          good_right_inds, verifyCnt[1])
+            ### Find the four below boundaries of the window ###
+            win_xleft_low = leftx_current - margin
+            win_xleft_high = leftx_current + margin
+            win_xright_low = rightx_current - margin
+            win_xright_high = rightx_current + margin
 
+            # Draw the windows on the visualization image
+            cv2.rectangle(out_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0, 255, 0), 2)
+            cv2.rectangle(out_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0, 255, 0), 2)
 
-                right_lane_inds.append(good_right_inds)
+            ### Identify the nonzero pixels in x and y within the window ###
+            good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & \
+                              (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
+            good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & \
+                               (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
 
-            if verifyCnt[0] > 3: #is left lane is not verifying
-                lsLeftAlive = False
-            elif verifyCnt[1] > 2:
-                lsRightAlive = False
+            # Append these indices to the lists
+            left_lane_inds.append(good_left_inds)
+            right_lane_inds.append(good_right_inds)
+
+            ### If you found > minpix pixels, recenter next window ###
+            ### (`right` or `leftx_current`) on their mean position ###
+            if len(good_left_inds) > minpix:
+                leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
+            if len(good_right_inds) > minpix:
+                rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
 
         # Concatenate the arrays of indices (previously was a list of lists of pixels)
         try:
-            left_lane_inds = [] if len(left_lane_inds) == 0 else np.concatenate(left_lane_inds)
-            if type(left_lane_inds) is not list: left_lane_inds.astype(np.int64)
-            right_lane_inds = [] if len(right_lane_inds) == 0 else np.concatenate(right_lane_inds)
-            if type(right_lane_inds) is not list: right_lane_inds.astype(np.int64)
+            left_lane_inds = np.concatenate(left_lane_inds)
+            right_lane_inds = np.concatenate(right_lane_inds)
         except ValueError:
             # Avoids an error if the above is not implemented fully
             pass
 
         # Extract left and right line pixel positions
-        if len(left_lane_inds) > 0:
-            leftx = nonzerox[left_lane_inds]
-            lefty = nonzeroy[left_lane_inds]
-        else:
-            leftx = np.empty(0)
-            lefty = np.empty(0)
-
-        if len(right_lane_inds) > 0:
-            rightx = nonzerox[right_lane_inds]
-            righty = nonzeroy[right_lane_inds]
-        else:
-            rightx = np.empty(0)
-            righty = np.empty(0)
+        leftx = nonzerox[left_lane_inds]
+        lefty = nonzeroy[left_lane_inds]
+        rightx = nonzerox[right_lane_inds]
+        righty = nonzeroy[right_lane_inds]
 
         return leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, out_img
-
-    def __lane_aggregation(self, img, currentX, margin, win_y_low, win_y_high, nonzerox, nonzeroy, minpix, good_inds, verifyCnt):
-        win_x_low = currentX - margin
-        win_x_high = currentX + margin
-
-        cv2.rectangle(img, (win_x_low, win_y_low), (win_x_high, win_y_high), (0, 255, 0), 2)
-
-        good_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & \
-                           (nonzerox >= win_x_low) & (nonzerox < win_x_high)).nonzero()[0]
-
-        if len(good_inds) > minpix:
-            currentX = np.int(np.mean(nonzerox[good_inds]))
-        else:
-            verifyCnt += 1
-
-        return currentX, good_inds, verifyCnt
 
     def fit_polynomial(self, binary_warped, nwindows=5, margin=50, minpix=50, show=True):
         # Find our lane pixels first
@@ -601,12 +565,8 @@ class LaneDet():
             right_fitx = 1 * ploty ** 2 + 1 * ploty
 
         # Colors in the left and right lane regions
-
-        if len(lefty) > 0:
-            out_img[lefty, leftx] = [255, 0, 0]
-
-        if len(righty) > 0:
-            out_img[righty, rightx] = [0, 0, 255]
+        out_img[lefty, leftx] = [255, 0, 0]
+        out_img[righty, rightx] = [0, 0, 255]
 
         for y, data in enumerate(left_fitx):
             left_val = out_img.shape[1]-1 if int(left_fitx[y]) >= out_img.shape[1] else int(left_fitx[y])
@@ -745,40 +705,19 @@ class LaneDet():
         # get center curvature
         left_poly = np.poly1d(left_fit)
         right_poly = np.poly1d(right_fit)
-
-        #temporary calculation
-        center_pol = None
-        if len(left_poly.coeffs) < 2 and len(right_poly.coeffs) < 2:
-            center_pol = self.prevCenterFit
-        elif len(left_poly.coeffs) < 2:
-            templx = right_poly(img.shape[0] - 1)
-            tempcx = self.prevCenterFit(img.shape[0] - 1)
-            center_pol = np.poly1d([right_poly.coeffs[0], right_poly.coeffs[1], right_poly.coeffs[2]+abs(templx-tempcx)])
-            center_pol.coeffs[2] = self.prevCenterFit.coeffs[2]
-
-        elif len(right_poly.coeffs) < 2:
-            templx = left_poly(img.shape[0]-1)
-            tempcx = self.prevCenterFit(img.shape[0]-1)
-            center_pol = np.poly1d([left_poly.coeffs[0], left_poly.coeffs[1], left_poly.coeffs[2]+abs(templx-tempcx)])
-            #center_pol.coeffs[2] = self.prevCenterFit.coeffs[2]
-            #print(center_pol.coeffs)
-        else:
-            center_pol = (left_poly + right_poly) / 2
+        center_pol = (left_poly + right_poly) / 2
 
         if self.prevCenterFit == None:
             self.prevCenterFit = center_pol
         else:
-            if abs((img.shape[1]/2) - center_pol(ploty[img.shape[0] - 1])) > 360:
+            if abs((img.shape[1]/2) - center_pol(ploty[img.shape[0] - 1])) > 50:
                 center_pol = self.prevCenterFit
             center_pol = self.prevCenterFit * 0.8 + center_pol * 0.2
             self.prevCenterFit = center_pol
 
-        self.prevleftPol = left_poly
-        self.prevrightPol = right_poly
         #get vertex
-        # if len(center_pol.coeffs) > 1:
-        #     vy = -center_pol.coeffs[1] / (2*center_pol.coeffs[0])
-        #     vx = center_pol(vy)
+        vy = -center_pol.coeffs[1] / (2*center_pol.coeffs[0])
+        vx = center_pol(vy)
 
         #calculate center line
         #center_fitx = center_pol.coeffs[0] * (ploty+vy-img.shape[0]) ** 2 + center_pol.coeffs[1] * (ploty+vy-img.shape[0]) + (center_pol.coeffs[2] + (img.shape[1]/2 - vx))
@@ -807,39 +746,6 @@ class LaneDet():
         return center_pol, center_fitx, ang_fitx, target_angle
 
 
-class App(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.title = 'PyQt5 Video'
-        self.left = 4000
-        self.top = 100
-        self.width = 1920
-        self.height = 1080
-        self.wsize = 1280
-        self.hsize = 960
-        self.initUI()
-
-    @pyqtSlot(QImage)
-    def setImage(self, image):
-        self.label.setPixmap(QPixmap.fromImage(image))
-
-    def initUI(self):
-
-        self.setWindowTitle(self.title)
-        self.setGeometry(self.left, self.top, self.width, self.height)
-        self.resize(self.wsize, self.hsize)
-        # create a label
-        self.label = QLabel(self)
-        self.label.resize(self.wsize, self.hsize)
-
-        self.show()
-        time.sleep(1)
-        th = cvThread(self)
-        th.signal.connect(self.setImage)
-        # th.changePixmap.connect(self.setImage)
-        th.start()
-
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    ex = App()
-    sys.exit(app.exec_())
+    th = cvThread()
+    th.run()
