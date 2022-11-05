@@ -1,5 +1,7 @@
 import math
 import sys
+from queue import Queue
+
 import rospy
 import cv2
 import numpy as np
@@ -169,6 +171,55 @@ class cvThread(QThread):
         send.steering = -steering
         self.ctrl_pub.publish(send)
 
+class LaneQueue:
+    def __init__(self, maxSize):
+        self.maxSize = maxSize
+        self.data = Queue(maxSize)
+        self.coeff1 = Queue(maxSize) #for valid graph vector
+        self.coeff0 = Queue(maxSize)  # for valid graph vector
+
+    def put(self, val:np.poly1d):
+        if self.data.qsize() == self.maxSize:
+            self.data.get()
+            self.data.put(val)
+            self.coeff1.get()
+            self.coeff1.put(0 if len(val.coeffs) < 2 else val.coeffs[1])
+            self.coeff0.get()
+            self.coeff0.put(0 if len(val.coeffs) < 2 else val.coeffs[0])
+        else:
+            self.data.put(val)
+            self.coeff1.put(0 if len(val.coeffs) < 2 else val.coeffs[1])
+            self.coeff0.put(0 if len(val.coeffs) < 2 else val.coeffs[0])
+
+    def getItems(self):
+        return self.data.queue
+
+    def get(self, i):
+        return self.data.queue[i]
+
+    def getFirst(self):
+        return self.data.queue[0]
+
+    def getLast(self):
+        return self.data.queue[self.maxSize-1]
+
+    # 1프레임 사이로 좌우로 왔다 갔다 하는 라인 필터하려고 중간값 사용, 필요한 부분에서만 사용
+    def getValidLine(self):
+        # vdata = np.median(self.coeff1.queue)
+        # print(self.coeff1.queue)
+        # print(vdata)
+        # print(np.argsort(self.coeff1.queue)[len(self.coeff1.queue)//2])
+        #medianIdx = np.argsort(self.coeff1.queue)[len(self.coeff1.queue) // 2]
+        medianIdx = np.argsort(self.coeff0.queue)[len(self.coeff0.queue) // 2]
+
+        return self.get(medianIdx)
+
+    def getSize(self):
+        return self.data.qsize()
+
+
+
+
 
 class LaneDet():
     def __init__(self, max_counter):
@@ -183,9 +234,10 @@ class LaneDet():
         self.src = None
         self.dst = None
 
+        #create by soobin
         self.prevCenterFit = None
-        self.prevleftPol = None
-        self.prevrightPol = None
+        self.leftPolyHist = LaneQueue(10)
+        self.rightPolyHist = LaneQueue(10)
 
     def set_presp_indices(self, src, dest):
         self.src = src
@@ -218,7 +270,7 @@ class LaneDet():
     def process_image(self, image):
         img = image#self.undistort_no_read(image, objpoints, imgpoints)
         #for fine lane
-        margin = 50
+        margin = 30
         minpix = 50
 
         kernel_size = 5
@@ -253,23 +305,26 @@ class LaneDet():
         if True or self.best_fit_left is None and self.best_fit_right is None:
             left_fit, right_fit, left_fitx, right_fitx, left_lane_indices, right_lane_indices, cuv_img = self.fit_polynomial\
                 (warped, nwindows=15, margin=margin, minpix=minpix, show=False)
-        else:
-            left_fit, right_fit, left_lane_indices, right_lane_indices = self.search_around_poly(warped, self.best_fit_left,
-                                                                                            self.best_fit_right,
-                                                                                            xmtr_per_pixel,
-                                                                                            ymtr_per_pixel)
+        # else:
+        #     left_fit, right_fit, left_lane_indices, right_lane_indices = self.search_around_poly(warped, self.best_fit_left,
+        #                                                                                     self.best_fit_right,
+        #                                                                                     xmtr_per_pixel,
+        #                                                                                     ymtr_per_pixel)
         # To debug Find our lane pixels first
         deb_leftx, deb_lefty, deb_rightx, deb_righty, deb_left_lane_indices, deb_right_lane_indices, f_line_img \
             = self.find_lines(warped, nwindows=15, margin=margin, minpix=minpix)
 
         self.counter += 1
 
-        birdeye_debug = self.draw_birdeye_debug(warped, left_fit, right_fit, deb_leftx, deb_lefty, deb_rightx, deb_righty,
-                                                deb_left_lane_indices, deb_right_lane_indices, unwarp_matrix)
         lane_img = self.draw_lines(img, left_fit, right_fit, unwarp_matrix)
         out_img = self.show_curvatures(lane_img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel)
 
         self.update_fit(left_fit, right_fit)
+
+        center_dist, left_curv, right_curv, target_angle, targetinfo = self.publish_data(lane_img, left_fit, right_fit,
+                                                                             xmtr_per_pixel, ymtr_per_pixel)
+
+        birdeye_debug = self.draw_birdeye_debug(cuv_img, left_fit, right_fit, targetinfo[0], targetinfo[1], targetinfo[2], targetinfo[3])
 
         cv_out_img_orig = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
         # merge to horizontal
@@ -278,8 +333,6 @@ class LaneDet():
         numpy_horizontal2 = np.concatenate((self.draw_wrapinfo(image), birdeye_debug), axis=1)
         num_mergy = np.concatenate((numpy_horizontal1, numpy_horizontal2), axis=0)
 
-        center_dist, left_curv, right_curv, target_angle = self.publish_data(lane_img, left_fit, right_fit, xmtr_per_pixel, ymtr_per_pixel)
-
         return num_mergy, (center_dist, left_curv, right_curv, target_angle)#out_img
 
     def publish_data(self, img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel):
@@ -287,7 +340,7 @@ class LaneDet():
         center_dist, dist_txt = self.dist_from_center(img, leftx, rightx, xmtr_per_pixel, ymtr_per_pixel)
         center_pol, center_fitx, ang_fitx, target_angle = self.getTargetPoint(img, leftx, rightx)
 
-        return center_dist, left_curvature, right_curvature, target_angle
+        return center_dist, left_curvature, right_curvature, target_angle, (center_pol, center_fitx, ang_fitx, target_angle)
 
 
 
@@ -305,32 +358,23 @@ class LaneDet():
 
         return out_img
 
-    def draw_birdeye_debug(self, unwarp_img, left_fit, right_fit, leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, minv):
+    def draw_birdeye_debug(self, unwarp_img, left_fit, right_fit, center_pol, center_fitx, ang_fitx, target_angle):
         ploty = np.linspace(0, unwarp_img.shape[0] - 1, unwarp_img.shape[0])
-        unwarp_img = np.where(unwarp_img == 1, 255, unwarp_img)
-        unwarp_img = cv2.cvtColor(unwarp_img, cv2.COLOR_GRAY2BGR)
+        # unwarp_img = np.where(unwarp_img == 1, 255, unwarp_img)
+        # unwarp_img = cv2.cvtColor(unwarp_img, cv2.COLOR_GRAY2BGR)
 
-        # Colors in the left and right lane regions
-        if len(lefty) > 0:
-            unwarp_img[lefty, leftx] = [255, 0, 0]
-        if len(righty) > 0:
-            unwarp_img[righty, rightx] = [0, 0, 255]
+        # # Colors in the left and right lane regions
+        # if len(lefty) > 0:
+        #     unwarp_img[lefty, leftx] = [255, 0, 0]
+        # if len(righty) > 0:
+        #     unwarp_img[righty, rightx] = [0, 0, 255]
 
-        center_pol, center_fitx, ang_fitx, target_angle = self.getTargetPoint(unwarp_img, left_fit, right_fit)
+        #center_pol, center_fitx, ang_fitx, target_angle = self.getTargetPoint(unwarp_img, left_fit, right_fit)
 
         # Find left and right points.
         left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
-        right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
 
         for y, data in enumerate(left_fitx):
-            left_val = unwarp_img.shape[1] - 1 if int(left_fitx[y]) >= unwarp_img.shape[1] else int(left_fitx[y])
-            left_val = 0 if left_val < 0 else left_val
-            right_val = unwarp_img.shape[1] - 1 if int(right_fitx[y]) >= unwarp_img.shape[1] else int(right_fitx[y])
-            right_val = 0 if right_val < 0 else right_val
-            # print(left_val, right_val)
-            unwarp_img[y, left_val] = [255, 234, 0]
-            unwarp_img[y, right_val] = [255, 234, 0]
-
             center_val = unwarp_img.shape[1] - 1 if int(center_fitx[y]) >= unwarp_img.shape[1] else int(center_fitx[y])
             center_val = 0 if center_val < 0 else center_val
             unwarp_img[y, center_val] = [255, 0, 0]
@@ -513,9 +557,6 @@ class LaneDet():
         left_lane_inds = []
         right_lane_inds = []
 
-        if isLeftAlive is False:
-            print('false')
-
         # Step through the windows one by one
         for window in range(nwindows):
             # Identify window boundaries in x and y (and right and left)
@@ -524,25 +565,27 @@ class LaneDet():
 
             good_left_inds = np.empty(0)
             good_right_inds = np.empty(0)
-
-            if isLeftAlive is True:
+            isDup = self.__checkDuplication(x_current=leftx_current, win_y_high=win_y_high, win_y_low=win_y_low,
+                                            margin=margin, basefithist=self.rightPolyHist, isLeft=True)
+            if isLeftAlive is True and isDup is False:
                 leftx_current, good_left_inds, verifyCnt[0] = self.__lane_aggregation(out_img, leftx_current, margin, win_y_low,
                                                                           win_y_high, nonzerox, nonzeroy, minpix,
                                                                           good_left_inds, verifyCnt[0])
                 # Append these indices to the lists
                 left_lane_inds.append(good_left_inds)
-            if isRightalive is True:
+
+            isDup = self.__checkDuplication(x_current=rightx_current, win_y_high=win_y_high, win_y_low=win_y_low,
+                                            margin=margin, basefithist=self.leftPolyHist, isRight=True)
+            if isRightalive is True and isDup is False:
                 rightx_current, good_right_inds, verifyCnt[1] = self.__lane_aggregation(out_img, rightx_current, margin, win_y_low,
                                                                           win_y_high, nonzerox, nonzeroy, minpix,
                                                                           good_right_inds, verifyCnt[1])
-
-
                 right_lane_inds.append(good_right_inds)
 
-            if verifyCnt[0] > 3: #is left lane is not verifying
-                isLeftAlive = False
-            elif verifyCnt[1] > 2:
-                isRightalive = False
+            # if verifyCnt[0] > 3: #is left lane is not verifying
+            #     isLeftAlive = False
+            # elif verifyCnt[1] > 2:
+            #     isRightalive = False
 
         # Concatenate the arrays of indices (previously was a list of lists of pixels)
         try:
@@ -571,6 +614,28 @@ class LaneDet():
 
         return leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, out_img
 
+    def __checkDuplication(self, x_current, win_y_high, win_y_low, margin, basefithist:LaneQueue, isLeft=False, isRight=False):
+        if basefithist.getSize() == 0:
+            return False
+        elif len(basefithist.getValidLine().coeffs) < 2:
+            return False
+
+        c_xl = x_current - margin
+        c_xh = x_current + margin
+
+        basefit = basefithist.getValidLine()
+        base_x = basefit(win_y_high)
+        base_xl = base_x - margin
+        base_xh = base_x + margin
+
+        isDuplication = False
+        if isLeft is True and c_xh >= base_xl:
+            isDuplication = True
+        elif isRight is True and c_xl <= base_xh:
+            isDuplication = True
+
+        return isDuplication
+
     def __lane_aggregation(self, img, currentX, margin, win_y_low, win_y_high, nonzerox, nonzeroy, minpix, good_inds, verifyCnt):
         win_x_low = currentX - margin
         win_x_high = currentX + margin
@@ -597,7 +662,8 @@ class LaneDet():
         left_fit = np.array([0, 0, 0]) if lefty.size == 0 and leftx.size == 0 else np.polyfit(lefty, leftx, 2)
         right_fit = np.array([0, 0, 0]) if rightx.size == 0 and righty.size == 0 else np.polyfit(righty, rightx, 2)
 
-
+        self.leftPolyHist.put(np.poly1d(left_fit))
+        self.rightPolyHist.put(np.poly1d(right_fit))
         # Generate x and y values for plotting
         ploty = np.linspace(0, binary_warped.shape[0] - 1, binary_warped.shape[0])
         try:
@@ -782,8 +848,6 @@ class LaneDet():
             center_pol = self.prevCenterFit * 0.8 + center_pol * 0.2
             self.prevCenterFit = center_pol
 
-        self.prevleftPol = left_poly
-        self.prevrightPol = right_poly
         #get vertex
         # if len(center_pol.coeffs) > 1:
         #     vy = -center_pol.coeffs[1] / (2*center_pol.coeffs[0])
