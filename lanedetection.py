@@ -217,7 +217,11 @@ class LaneQueue:
     def getSize(self):
         return self.data.qsize()
 
-
+    def checkValidLine(self, poly:np.poly1d):
+        if len(poly.coeffs) < 2:
+            return False
+        else:
+            return True
 
 
 
@@ -311,8 +315,8 @@ class LaneDet():
         #                                                                                     xmtr_per_pixel,
         #                                                                                     ymtr_per_pixel)
         # To debug Find our lane pixels first
-        deb_leftx, deb_lefty, deb_rightx, deb_righty, deb_left_lane_indices, deb_right_lane_indices, f_line_img \
-            = self.find_lines(warped, nwindows=15, margin=margin, minpix=minpix)
+        # deb_leftx, deb_lefty, deb_rightx, deb_righty, deb_left_lane_indices, deb_right_lane_indices, f_line_img \
+        #     = self.find_lines_old(warped, nwindows=15, margin=margin, minpix=minpix)
 
         self.counter += 1
 
@@ -326,9 +330,9 @@ class LaneDet():
 
         birdeye_debug = self.draw_birdeye_debug(cuv_img, left_fit, right_fit, targetinfo[0], targetinfo[1], targetinfo[2], targetinfo[3])
 
-        cv_out_img_orig = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
+        #cv_out_img_orig = cv2.cvtColor(cv_out_warped_img, cv2.COLOR_GRAY2BGR)
         # merge to horizontal
-        numpy_horizontal1 = np.concatenate((out_img, f_line_img), axis=1)
+        numpy_horizontal1 = np.concatenate((out_img, cv_out_warped_img), axis=1)
         # merge to horizontal
         numpy_horizontal2 = np.concatenate((self.draw_wrapinfo(image), birdeye_debug), axis=1)
         num_mergy = np.concatenate((numpy_horizontal1, numpy_horizontal2), axis=0)
@@ -520,7 +524,124 @@ class LaneDet():
 
         return warped, M, minv, out_img_orig, out_warped_img
 
-    def find_lines(self, warped_img, nwindows=9, margin=80, minpix=40):
+    def __findBasePoint(self, img):
+
+        # Take a histogram of the bottom half of the image
+        histogram = np.sum(img[img.shape[0] // 2:, :], axis=0)
+
+        # Find the peak of the left and right halves of the histogram
+        # These will be the starting point for the left and right lines
+        midpoint = np.int(histogram.shape[0] // 2)
+
+        # if left right is all both valid, or single lane is valid, use historical lane data to decide base lane
+        # use temporary valid lane
+        # 가끔 튀는값이 있음. 체크해봐야할 것 같음
+        if self.leftPolyHist.getSize() > 3 and self.leftPolyHist.checkValidLine(self.leftPolyHist.getFirst()) is True:
+            leftx_base = self.leftPolyHist.getFirst()(img.shape[0]-1)
+        else:
+
+            leftx_base = np.argmax(histogram[:midpoint])
+
+        if self.rightPolyHist.getSize() > 3 and self.rightPolyHist.checkValidLine(self.rightPolyHist.getFirst()) is True:
+            rightx_base = self.rightPolyHist.getFirst()(img.shape[0]-1)
+        else:
+            rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+
+        #leftx_base = np.argmax(histogram[:midpoint])
+        #rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+        return int(leftx_base), int(rightx_base)
+
+    def __find_lines(self, warped_img, nwindows=9, margin=80, minpix=40):
+        minWidthtoLane = 20
+        isLeftAlive = True
+        isRightalive = True
+        verifyCnt = [0, 0]
+
+        leftx_base, rightx_base = self.__findBasePoint(warped_img)
+
+
+        # Create an output image to draw on and visualize the result
+        out_img = np.dstack((warped_img, warped_img, warped_img)) * 255
+
+        # Set height of windows - based on nwindows above and image shape
+        window_height = np.int(warped_img.shape[0] // nwindows)
+
+        # Identify the x and y positions of all nonzero pixels in the image
+        nonzero = warped_img.nonzero()
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+
+        # Current positions to be updated later for each window in nwindows
+        leftx_current = leftx_base
+        rightx_current = rightx_base
+
+        # Create empty lists to receive left and right lane pixel indices
+        left_lane_inds = []
+        right_lane_inds = []
+
+        # Step through the windows one by one
+        for window in range(nwindows):
+            # Identify window boundaries in x and y (and right and left)
+            win_y_low = warped_img.shape[0] - (window + 1) * window_height
+            win_y_high = warped_img.shape[0] - window * window_height
+
+            good_left_inds = np.empty(0)
+            good_right_inds = np.empty(0)
+            isDup = self.__checkDuplication(x_current=leftx_current, win_y_high=win_y_high, win_y_low=win_y_low,
+                                            margin=margin, basefithist=self.rightPolyHist, isLeft=True)
+            if isLeftAlive is True and isDup is False:
+                leftx_current, good_left_inds, verifyCnt[0] = self.__lane_aggregation(out_img, leftx_current, margin,
+                                                                                      win_y_low,
+                                                                                      win_y_high, nonzerox, nonzeroy,
+                                                                                      minpix,
+                                                                                      good_left_inds, verifyCnt[0])
+                # Append these indices to the lists
+                left_lane_inds.append(good_left_inds)
+
+            isDup = self.__checkDuplication(x_current=rightx_current, win_y_high=win_y_high, win_y_low=win_y_low,
+                                            margin=margin, basefithist=self.leftPolyHist, isRight=True)
+            if isRightalive is True and isDup is False:
+                rightx_current, good_right_inds, verifyCnt[1] = self.__lane_aggregation(out_img, rightx_current, margin,
+                                                                                        win_y_low,
+                                                                                        win_y_high, nonzerox, nonzeroy,
+                                                                                        minpix,
+                                                                                        good_right_inds, verifyCnt[1])
+                right_lane_inds.append(good_right_inds)
+
+            # if verifyCnt[0] > 3: #is left lane is not verifying
+            #     isLeftAlive = False
+            # elif verifyCnt[1] > 2:
+            #     isRightalive = False
+
+        # Concatenate the arrays of indices (previously was a list of lists of pixels)
+        try:
+            left_lane_inds = [] if len(left_lane_inds) == 0 else np.concatenate(left_lane_inds)
+            if type(left_lane_inds) is not list: left_lane_inds.astype(np.int64)
+            right_lane_inds = [] if len(right_lane_inds) == 0 else np.concatenate(right_lane_inds)
+            if type(right_lane_inds) is not list: right_lane_inds.astype(np.int64)
+        except ValueError:
+            # Avoids an error if the above is not implemented fully
+            pass
+
+        # Extract left and right line pixel positions
+        if len(left_lane_inds) > 0:
+            leftx = nonzerox[left_lane_inds]
+            lefty = nonzeroy[left_lane_inds]
+        else:
+            leftx = np.empty(0)
+            lefty = np.empty(0)
+
+        if len(right_lane_inds) > 0:
+            rightx = nonzerox[right_lane_inds]
+            righty = nonzeroy[right_lane_inds]
+        else:
+            rightx = np.empty(0)
+            righty = np.empty(0)
+
+        return leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, out_img
+
+
+    def find_lines_old(self, warped_img, nwindows=9, margin=80, minpix=40):
         minWidthtoLane = 20
         isLeftAlive = True
         isRightalive = True
@@ -657,7 +778,7 @@ class LaneDet():
     def fit_polynomial(self, binary_warped, nwindows=5, margin=80, minpix=50, show=True):
         # Find our lane pixels first
         leftx, lefty, rightx, righty, left_lane_inds, right_lane_inds, out_img \
-            = self.find_lines(binary_warped, nwindows=nwindows, margin=margin, minpix=minpix)
+            = self.__find_lines(binary_warped, nwindows=nwindows, margin=margin, minpix=minpix)
 
         left_fit = np.array([0, 0, 0]) if lefty.size == 0 and leftx.size == 0 else np.polyfit(lefty, leftx, 2)
         right_fit = np.array([0, 0, 0]) if rightx.size == 0 and righty.size == 0 else np.polyfit(righty, rightx, 2)
