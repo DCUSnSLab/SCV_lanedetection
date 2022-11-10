@@ -600,13 +600,13 @@ class LaneDet():
 
             isDup = self.__checkDuplication(x_current=rightx_current, win_y_high=win_y_high, win_y_low=win_y_low,
                                             margin=margin, basefithist=self.leftPolyHist, isRight=True)
-            if isRightalive is True and isDup is False:
-                rightx_current, good_right_inds, verifyCnt[1] = self.__lane_aggregation(out_img, rightx_current, margin,
-                                                                                        win_y_low,
-                                                                                        win_y_high, nonzerox, nonzeroy,
-                                                                                        minpix,
-                                                                                        good_right_inds, verifyCnt[1])
-                right_lane_inds.append(good_right_inds)
+            # if isRightalive is True and isDup is False:
+            #     rightx_current, good_right_inds, verifyCnt[1] = self.__lane_aggregation(out_img, rightx_current, margin,
+            #                                                                             win_y_low,
+            #                                                                             win_y_high, nonzerox, nonzeroy,
+            #                                                                             minpix,
+            #                                                                             good_right_inds, verifyCnt[1])
+            #     right_lane_inds.append(good_right_inds)
 
             # if verifyCnt[0] > 3: #is left lane is not verifying
             #     isLeftAlive = False
@@ -766,12 +766,22 @@ class LaneDet():
         good_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & \
                            (nonzerox >= win_x_low) & (nonzerox < win_x_high)).nonzero()[0]
 
+        goodx = nonzerox[good_inds]
+        goody = nonzeroy[good_inds]
+
         if len(good_inds) > minpix:
-            #get 10 percentile data from top to calcuate next bounding box
-            per10 = int(len(good_inds) * 0.1)
-            currentX = np.int(np.mean(nonzerox[good_inds[:per10]]))
+            rectfit = np.polyfit(goody, goodx, 2)
+            poly = np.poly1d(rectfit)
+            currentX = int(poly(win_y_low))
         else:
             verifyCnt += 1
+
+        # if len(good_inds) > minpix:
+        #     #get 10 percentile data from top to calcuate next bounding box
+        #     per10 = int(len(good_inds) * 0.1)
+        #     currentX = np.int(np.mean(nonzerox[good_inds[:per10]]))
+        # else:
+        #     verifyCnt += 1
 
         return currentX, good_inds, verifyCnt
 
